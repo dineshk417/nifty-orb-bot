@@ -39,7 +39,7 @@ SIDEWAYS_BAND = 0.3
 
 # Market hours (IST)
 BRIEFING_START = dt.time(9, 30)
-BRIEFING_END   = dt.time(9, 40)
+BRIEFING_END   = dt.time(14, 50)   # send briefing any time before 2:50 PM if missed
 TRADE_END      = dt.time(14, 55)   # 2:55 PM
 EOD_START      = dt.time(15,  5)   # 3:05 PM
 BOT_END        = dt.time(15, 15)   # 3:15 PM — last run
@@ -377,14 +377,14 @@ def main():
     if bars is None:
         log("Data fetch failed — skipping this run."); save_state(state); return
 
-    # ── STEP 4: Morning briefing ──────────────────────────────────────
+    # ── STEP 4: Morning briefing (send once, any time before 2:50 PM) ──
     if not state["briefing_sent"] and now <= BRIEFING_END:
         log("Sending morning briefing...")
         state = do_briefing(state, bars)
-        save_state(state); return   # first run just sends briefing
+        # Don't return — continue to monitoring in the same run
 
     # ── STEP 5: Intraday monitoring ───────────────────────────────────
-    if state["briefing_sent"] and BRIEFING_END < now < TRADE_END:
+    if state["briefing_sent"] and now < TRADE_END:
         for sym, w in state["watching"].items():
             if w["exited"]: continue
             data = get_stock_data(sym, bars)
