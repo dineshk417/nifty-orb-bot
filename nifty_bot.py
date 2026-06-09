@@ -110,24 +110,63 @@ def fresh_state():
 
 # ── DATA FETCHING ──────────────────────────────────────────────────────
 def get_regime():
-    nifty = yf.download("^NSEI", period="60d", interval="1d",
-                        progress=False, auto_adjust=True)
-    if len(nifty) < MA_PERIOD: return "UNKNOWN", 0, 0
-    s     = nifty["Close"].squeeze()
-    close = float(s.iloc[-1])
-    ma20  = float(s.tail(MA_PERIOD).mean())
-    diff  = (close - ma20) / ma20 * 100
-    if diff >  SIDEWAYS_BAND: regime = "UPTREND"
-    elif diff < -SIDEWAYS_BAND: regime = "DOWNTREND"
-    else: regime = "SIDEWAYS"
-    return regime, round(close, 1), round(ma20, 1)
+    """
+    Fetch Nifty 50 data with 3 retries and 3 symbol fallbacks.
+    ^NSEI        → NSE Nifty 50 index (may be blocked on some servers)
+    NIFTYBEES.NS → Nifty BeES ETF (always available, tracks Nifty 50)
+    ICICIB22.NS  → ICICI Nifty 50 ETF (second fallback)
+    """
+    symbols = ["^NSEI", "NIFTYBEES.NS", "ICICIB22.NS"]
+    import time as _time
+
+    for sym in symbols:
+        for attempt in range(3):
+            try:
+                df = yf.download(sym, period="60d", interval="1d",
+                                 progress=False, auto_adjust=True)
+                if df.empty or len(df) < MA_PERIOD:
+                    log(f"  {sym} attempt {attempt+1}: only {len(df)} bars")
+                    _time.sleep(2); continue
+
+                s     = df["Close"].squeeze()
+                close = float(s.iloc[-1])
+                ma20  = float(s.tail(MA_PERIOD).mean())
+                diff  = (close - ma20) / ma20 * 100
+
+                if diff >  SIDEWAYS_BAND: regime = "UPTREND"
+                elif diff < -SIDEWAYS_BAND: regime = "DOWNTREND"
+                else: regime = "SIDEWAYS"
+
+                log(f"  Regime via {sym}: {regime} | close={close:.1f} | MA20={ma20:.1f}")
+                return regime, round(close, 1), round(ma20, 1)
+
+            except Exception as e:
+                log(f"  {sym} attempt {attempt+1} error: {e}")
+                _time.sleep(2)
+
+    log("All regime sources failed")
+    return "UNKNOWN", 0, 0
 
 def fetch_bars():
     """Fetch 1-min bars (live signals) + 5-min bars (OR levels) + daily (gap calc)."""
+    import time as _time
     tks = [f"{s}.NS" for s in NIFTY50]
-    r1  = yf.download(tks, period="1d",  interval="1m",  progress=False, auto_adjust=True)
-    r5  = yf.download(tks, period="2d",  interval="5m",  progress=False, auto_adjust=True)
-    rd  = yf.download(tks, period="10d", interval="1d",  progress=False, auto_adjust=True)
+
+    for attempt in range(3):
+        try:
+            r1 = yf.download(tks, period="1d",  interval="1m",  progress=False, auto_adjust=True)
+            r5 = yf.download(tks, period="2d",  interval="5m",  progress=False, auto_adjust=True)
+            rd = yf.download(tks, period="10d", interval="1d",  progress=False, auto_adjust=True)
+            if not r1.empty and not r5.empty:
+                break
+            log(f"  fetch_bars attempt {attempt+1}: empty data, retrying...")
+            _time.sleep(3)
+        except Exception as e:
+            log(f"  fetch_bars attempt {attempt+1} error: {e}")
+            _time.sleep(3)
+    else:
+        return None
+
     if r1.empty or r5.empty: return None
 
     def clean(df):
