@@ -1,0 +1,54 @@
+name: Nifty ORB Signal Bot
+
+on:
+  schedule:
+    # Every minute, Mon–Fri, 4:00–9:59 AM UTC  =  9:30 AM–3:29 PM IST
+    - cron: '*/1 4-9 * * 1-5'
+  workflow_dispatch:   # also allow manual "Run workflow" button in GitHub UI
+
+jobs:
+  signal:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # needed to commit state.json back to repo
+
+    steps:
+      # 1. Get latest repo (includes latest state.json)
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # 2. Python setup
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # 3. Cache pip packages (speeds up install after first run)
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: pip-
+
+      # 4. Install dependencies
+      - name: Install dependencies
+        run: pip install -r requirements.txt --quiet
+
+      # 5. Run signal bot
+      - name: Run signal bot
+        env:
+          TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python nifty_bot.py
+
+      # 6. Save updated state.json back to repo
+      - name: Save state
+        run: |
+          git config user.name  "ORB Signal Bot"
+          git config user.email "bot@nifty-orb-signals.com"
+          git add state.json
+          git diff --staged --quiet || git commit -m "bot: state $(date -u +'%H:%M UTC')"
+          git push
