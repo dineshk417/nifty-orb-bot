@@ -293,7 +293,7 @@ def do_briefing(state, bars):
     state["watching"] = watching
 
     # Send morning message
-    diff = (state["nifty"] - state["ma20"]) / state["ma20"] * 100
+    diff = (state["nifty"] - state["ma20"]) / state["ma20"] * 100 if state["ma20"] else 0
     date_str = today.strftime("%d %b %Y")
     msg  = f"<b>🔔 NIFTY ORB — {date_str}</b>  <i>{ist_now().strftime('%I:%M %p')} IST</i>\n\n"
     msg += f"<b>{r_emoji} Regime: {state['regime']}</b>\n"
@@ -323,13 +323,19 @@ def do_briefing(state, bars):
 
 # ── MAIN ───────────────────────────────────────────────────────────────
 def main():
-    now  = ist_time()
+    now   = ist_time()
     today = str(ist_now().date())
     log(f"Bot running | IST: {now.strftime('%H:%M:%S')}")
 
+    # ── Startup check: verify Telegram credentials work ───────────────
+    if not TOKEN or not CHAT_ID:
+        log("ERROR: TELEGRAM_TOKEN or TELEGRAM_CHAT_ID not set in environment!")
+        log(f"TOKEN set: {bool(TOKEN)} | CHAT_ID set: {bool(CHAT_ID)}")
+        return
+
     # Skip if outside bot operating hours
     if now < BRIEFING_START or now > BOT_END:
-        log("Outside market hours — nothing to do."); return
+        log(f"Outside market hours ({now}) — nothing to do."); return
 
     # Weekend check
     if ist_now().weekday() >= 5:
@@ -344,22 +350,25 @@ def main():
         state = fresh_state()
         state["date"] = today
 
-    # ── STEP 1: Regime (once per day, before briefing) ────────────────
-    if not state["regime"]:
+    # ── STEP 1: Regime (fetch if not set OR if last fetch failed) ────────
+    if not state["regime"] or state["regime"] == "UNKNOWN" or state["ma20"] == 0:
         log("Fetching Nifty regime...")
         regime, nifty, ma20 = get_regime()
         state["regime"]    = regime
-        state["direction"] = "LONG" if regime=="UPTREND" else "SHORT"
+        state["direction"] = "LONG" if regime == "UPTREND" else "SHORT"
         state["nifty"]     = nifty
         state["ma20"]      = ma20
         log(f"Regime: {regime} | Nifty: {nifty} | MA20: {ma20}")
+        if regime == "UNKNOWN":
+            send("⚠️ ORB Bot: Could not fetch Nifty data. Will retry next minute.")
+            save_state(state); return
 
     # ── STEP 2: Sideways — no trades ─────────────────────────────────
     if state["regime"] == "SIDEWAYS":
         if not state["briefing_sent"]:
             log("SIDEWAYS — sending no-trade message")
             state["briefing_sent"] = True
-            diff = (state["nifty"]-state["ma20"])/state["ma20"]*100
+            diff = (state["nifty"]-state["ma20"])/state["ma20"]*100 if state["ma20"] else 0
             send(
                 f"<b>🔔 NIFTY ORB — {ist_now().strftime('%d %b %Y')}</b>\n\n"
                 f"<b>⚠️ SIDEWAYS MARKET</b>\n"
