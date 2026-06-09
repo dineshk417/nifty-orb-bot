@@ -1,1 +1,11 @@
-{"date":"","regime":"","direction":"","nifty":0,"ma20":0,"briefing_sent":false,"close_sent":false,"eod_sent":false,"watching":{}}
+{
+  "date": "2026-06-09",
+  "regime": "UNKNOWN",
+  "direction": "SHORT",
+  "nifty": 0,
+  "ma20": 0,
+  "briefing_sent": false,
+  "close_sent": false,
+  "eod_sent": false,
+  "watching": {}
+}
