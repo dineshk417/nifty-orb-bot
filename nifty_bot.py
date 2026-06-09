@@ -25,6 +25,27 @@ import requests
 import warnings
 warnings.filterwarnings("ignore")
 
+# ── BROWSER-IMPERSONATING SESSION (bypasses Yahoo's cloud-IP block) ───
+# Yahoo Finance blocks datacenter IPs (GitHub/AWS) that send a plain
+# python-requests User-Agent. curl_cffi impersonates a real Chrome
+# browser TLS fingerprint, which Yahoo accepts.
+YF_SESSION = None
+try:
+    from curl_cffi import requests as cffi_requests
+    YF_SESSION = cffi_requests.Session(impersonate="chrome")
+except Exception as _e:
+    print(f"[init] curl_cffi unavailable ({_e}) — using default session")
+
+def yf_download(*args, **kwargs):
+    """yf.download with browser session when available."""
+    if YF_SESSION is not None:
+        try:
+            return yf.download(*args, session=YF_SESSION, **kwargs)
+        except TypeError:
+            # Older/newer yfinance may not accept session kwarg
+            return yf.download(*args, **kwargs)
+    return yf.download(*args, **kwargs)
+
 # ── CREDENTIALS (from GitHub Secrets / env vars) ──────────────────────
 TOKEN   = os.environ.get("TELEGRAM_TOKEN",   "")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
@@ -146,27 +167,34 @@ def compute_regime_from_stocks(daily_close):
 
     return regime, avg_ret, 0   # nifty=avg_ret%, ma20=0 (not used for display)
 
+LAST_ERROR = ""   # holds the most recent download error for diagnostics
+
 def fetch_bars():
     """Fetch 1-min bars (live signals) + 5-min bars (OR levels) + daily (gap calc)."""
+    global LAST_ERROR
     import time as _time
     tks = [f"{s}.NS" for s in NIFTY50]
 
+    r1 = r5 = rd = None
     for attempt in range(3):
         try:
-            r1 = yf.download(tks, period="1d",  interval="1m",  progress=False, auto_adjust=True)
-            r5 = yf.download(tks, period="2d",  interval="5m",  progress=False, auto_adjust=True)
-            rd = yf.download(tks, period="60d", interval="1d",  progress=False, auto_adjust=True)
-            if not r1.empty and not r5.empty:
+            r1 = yf_download(tks, period="1d",  interval="1m",  progress=False, auto_adjust=True)
+            r5 = yf_download(tks, period="2d",  interval="5m",  progress=False, auto_adjust=True)
+            rd = yf_download(tks, period="60d", interval="1d",  progress=False, auto_adjust=True)
+            if r1 is not None and not r1.empty and r5 is not None and not r5.empty:
+                LAST_ERROR = ""
                 break
-            log(f"  fetch_bars attempt {attempt+1}: empty data, retrying...")
+            LAST_ERROR = f"empty data (1m rows={0 if r1 is None else len(r1)}, 5m rows={0 if r5 is None else len(r5)})"
+            log(f"  fetch_bars attempt {attempt+1}: {LAST_ERROR}")
             _time.sleep(3)
         except Exception as e:
-            log(f"  fetch_bars attempt {attempt+1} error: {e}")
+            LAST_ERROR = f"{type(e).__name__}: {e}"
+            log(f"  fetch_bars attempt {attempt+1} error: {LAST_ERROR}")
             _time.sleep(3)
     else:
         return None
 
-    if r1.empty or r5.empty: return None
+    if r1 is None or r1.empty or r5 is None or r5.empty: return None
 
     def clean(df):
         df = df.copy()
@@ -393,7 +421,10 @@ def main():
     bars = fetch_bars()
     if bars is None:
         log("Data fetch failed — skipping this run.")
-        send("⚠️ ORB Bot: Could not download stock data. Will retry.")
+        sess_type = "curl_cffi(chrome)" if YF_SESSION is not None else "default-requests"
+        send(f"⚠️ ORB Bot: data download failed.\n"
+             f"Session: {sess_type}\n"
+             f"Error: <code>{LAST_ERROR[:300]}</code>")
         save_state(state); return
 
     # ── STEP 2: Compute regime from constituent stocks (no index needed) ─
