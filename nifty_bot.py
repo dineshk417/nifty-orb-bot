@@ -109,43 +109,42 @@ def fresh_state():
     }
 
 # ── DATA FETCHING ──────────────────────────────────────────────────────
-def get_regime():
+def compute_regime_from_stocks(daily_close):
     """
-    Fetch Nifty 50 data with 3 retries and 3 symbol fallbacks.
-    ^NSEI        → NSE Nifty 50 index (may be blocked on some servers)
-    NIFTYBEES.NS → Nifty BeES ETF (always available, tracks Nifty 50)
-    ICICIB22.NS  → ICICI Nifty 50 ETF (second fallback)
+    Compute market regime from constituent stocks' daily data.
+    No external index needed — uses the same data we already download.
+
+    Method: equal-weighted synthetic index
+      - For each stock, compute: current price / 20-day-ago price - 1
+      - Average across all stocks = synthetic Nifty 20-day return
+      - > +0.3%  → UPTREND
+      - < -0.3%  → DOWNTREND
+      - else     → SIDEWAYS
     """
-    symbols = ["^NSEI", "NIFTYBEES.NS", "ICICIB22.NS"]
-    import time as _time
+    returns = []
+    for sym in NIFTY50:
+        if sym not in daily_close.columns: continue
+        s = daily_close[sym].dropna()
+        if len(s) < MA_PERIOD + 2: continue
+        try:
+            cur  = float(s.iloc[-1])
+            past = float(s.iloc[-(MA_PERIOD + 1)])
+            if past > 0:
+                returns.append((cur - past) / past * 100)
+        except: continue
 
-    for sym in symbols:
-        for attempt in range(3):
-            try:
-                df = yf.download(sym, period="60d", interval="1d",
-                                 progress=False, auto_adjust=True)
-                if df.empty or len(df) < MA_PERIOD:
-                    log(f"  {sym} attempt {attempt+1}: only {len(df)} bars")
-                    _time.sleep(2); continue
+    if len(returns) < 10:
+        log(f"  Only {len(returns)} stocks had data — cannot compute regime")
+        return "UNKNOWN", 0, 0
 
-                s     = df["Close"].squeeze()
-                close = float(s.iloc[-1])
-                ma20  = float(s.tail(MA_PERIOD).mean())
-                diff  = (close - ma20) / ma20 * 100
+    avg_ret = round(np.mean(returns), 2)
+    log(f"  Synthetic Nifty 20-day avg return: {avg_ret:+.2f}% across {len(returns)} stocks")
 
-                if diff >  SIDEWAYS_BAND: regime = "UPTREND"
-                elif diff < -SIDEWAYS_BAND: regime = "DOWNTREND"
-                else: regime = "SIDEWAYS"
+    if avg_ret >  SIDEWAYS_BAND: regime = "UPTREND"
+    elif avg_ret < -SIDEWAYS_BAND: regime = "DOWNTREND"
+    else: regime = "SIDEWAYS"
 
-                log(f"  Regime via {sym}: {regime} | close={close:.1f} | MA20={ma20:.1f}")
-                return regime, round(close, 1), round(ma20, 1)
-
-            except Exception as e:
-                log(f"  {sym} attempt {attempt+1} error: {e}")
-                _time.sleep(2)
-
-    log("All regime sources failed")
-    return "UNKNOWN", 0, 0
+    return regime, avg_ret, 0   # nifty=avg_ret%, ma20=0 (not used for display)
 
 def fetch_bars():
     """Fetch 1-min bars (live signals) + 5-min bars (OR levels) + daily (gap calc)."""
@@ -156,7 +155,7 @@ def fetch_bars():
         try:
             r1 = yf.download(tks, period="1d",  interval="1m",  progress=False, auto_adjust=True)
             r5 = yf.download(tks, period="2d",  interval="5m",  progress=False, auto_adjust=True)
-            rd = yf.download(tks, period="10d", interval="1d",  progress=False, auto_adjust=True)
+            rd = yf.download(tks, period="60d", interval="1d",  progress=False, auto_adjust=True)
             if not r1.empty and not r5.empty:
                 break
             log(f"  fetch_bars attempt {attempt+1}: empty data, retrying...")
@@ -336,7 +335,7 @@ def do_briefing(state, bars):
     date_str = today.strftime("%d %b %Y")
     msg  = f"<b>🔔 NIFTY ORB — {date_str}</b>  <i>{ist_now().strftime('%I:%M %p')} IST</i>\n\n"
     msg += f"<b>{r_emoji} Regime: {state['regime']}</b>\n"
-    msg += f"   Nifty: <b>{state['nifty']:,.0f}</b>  |  20-MA: {state['ma20']:,.0f}  ({diff:+.2f}%)\n"
+    msg += f"   Nifty 50 avg 20-day return: <b>{state['nifty']:+.2f}%</b>\n"
     msg += f"   Bias: <b>{direction} only</b> today\n\n"
     msg += f"<b>⚙️</b> OR≤0.75% | Fixed 2R exit | ₹{int(RISK):,} risk | Close 2:55 PM\n"
     msg += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -389,41 +388,42 @@ def main():
         state = fresh_state()
         state["date"] = today
 
-    # ── STEP 1: Regime (fetch if not set OR if last fetch failed) ────────
-    if not state["regime"] or state["regime"] == "UNKNOWN" or state["ma20"] == 0:
-        log("Fetching Nifty regime...")
-        regime, nifty, ma20 = get_regime()
+    # ── STEP 1: Fetch all market data (1-min + 5-min + 60-day daily) ────
+    log("Fetching market data...")
+    bars = fetch_bars()
+    if bars is None:
+        log("Data fetch failed — skipping this run.")
+        send("⚠️ ORB Bot: Could not download stock data. Will retry.")
+        save_state(state); return
+
+    # ── STEP 2: Compute regime from constituent stocks (no index needed) ─
+    if not state["regime"] or state["regime"] == "UNKNOWN":
+        log("Computing regime from Nifty 50 constituent stocks...")
+        regime, avg_ret, _ = compute_regime_from_stocks(bars["dc"])
         state["regime"]    = regime
         state["direction"] = "LONG" if regime == "UPTREND" else "SHORT"
-        state["nifty"]     = nifty
-        state["ma20"]      = ma20
-        log(f"Regime: {regime} | Nifty: {nifty} | MA20: {ma20}")
+        state["nifty"]     = avg_ret   # synthetic 20-day avg return %
+        state["ma20"]      = 0
+        log(f"Regime: {regime} | Avg 20d return: {avg_ret:+.2f}%")
         if regime == "UNKNOWN":
-            send("⚠️ ORB Bot: Could not fetch Nifty data. Will retry next minute.")
+            send("⚠️ ORB Bot: Not enough stock data to determine trend. Will retry.")
             save_state(state); return
 
-    # ── STEP 2: Sideways — no trades ─────────────────────────────────
+    # ── STEP 3: Sideways — no trades ─────────────────────────────────
     if state["regime"] == "SIDEWAYS":
         if not state["briefing_sent"]:
             log("SIDEWAYS — sending no-trade message")
             state["briefing_sent"] = True
-            diff = (state["nifty"]-state["ma20"])/state["ma20"]*100 if state["ma20"] else 0
             send(
                 f"<b>🔔 NIFTY ORB — {ist_now().strftime('%d %b %Y')}</b>\n\n"
                 f"<b>⚠️ SIDEWAYS MARKET</b>\n"
-                f"Nifty {state['nifty']:,.0f} | 20-MA {state['ma20']:,.0f} ({diff:+.2f}%)\n\n"
+                f"Nifty 50 stocks avg 20-day return: {state['nifty']:+.2f}%\n\n"
                 f"🚫 <b>NO TRADES TODAY.</b> Sit on cash."
             )
         save_state(state); return
 
     direction = state["direction"]
     t_emoji   = "🟢" if direction=="LONG" else "🔴"
-
-    # ── STEP 3: Fetch market data ─────────────────────────────────────
-    log("Fetching market data (1-min + 5-min)...")
-    bars = fetch_bars()
-    if bars is None:
-        log("Data fetch failed — skipping this run."); save_state(state); return
 
     # ── STEP 4: Morning briefing (send once, any time before 2:50 PM) ──
     if not state["briefing_sent"] and now <= BRIEFING_END:
